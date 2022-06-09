@@ -4,6 +4,7 @@ import queue
 import time
 import random
 from enum import IntEnum
+import threading
 
 
 from PySide6 import QtWidgets, QtCore, QtSerialPort
@@ -35,16 +36,21 @@ class FlowWorker(QtCore.QObject):
         self.current_command = ''
 
     def process_response(self, response: bytes):
+        self.send_log.emit(threading.current_thread().name + str(threading.current_thread().ident))
         compare = response == b'FlowDone\r\n'
-        if compare and self.current_line < len(self.command_list):
-            self.send_log.emit('next')
-            self.start_flow()
+        if compare:
+            self.current_line += 1
+            percentage = self.current_line / len(self.command_list) * 100
+            self.send_percentange.emit(int(percentage))
+            if self.current_line < len(self.command_list):
+                self.send_log.emit('next')
+                self.start_flow()
+
 
     def start_flow(self):
         command = self.command_list[self.current_line]
         self.current_command = command
         self.send_command.emit(command)
-        self.current_line += 1
 
 
 
@@ -52,12 +58,11 @@ class CommandWorker(QtCore.QObject):
     send_log = QtCore.Signal(str)
     receive_response = QtCore.Signal(bytes)
 
-    command_queue = queue.PriorityQueue()
-
     serial = None
     running_flow = False
 
     def open_uart(self, port: str):
+        self.send_log.emit(str(threading.current_thread().ident))
         self.serial = QtSerialPort.QSerialPort()
         self.serial.setPortName(port)
         self.serial.setBaudRate(115200)
@@ -133,7 +138,14 @@ class MainController(QtWidgets.QMainWindow):
         self.flow_thread.started.connect(self.flow_worker.start_flow)
         self.flow_worker.send_log.connect(self.write_log)
         self.flow_worker.send_command.connect(self.worker.send_command)
+        self.flow_worker.send_percentange.connect(self.update_progress_bar)
         self.worker.receive_response.connect(self.flow_worker.process_response)
+
+        self.ui.flow_progress_bar.setValue(0)
+
+    
+    def update_progress_bar(self, percentage: int):
+        self.ui.flow_progress_bar.setValue(percentage)
 
     def send_continue_command(self):
         self.send_command.emit('suspend[0]')
@@ -153,6 +165,7 @@ class MainController(QtWidgets.QMainWindow):
         self.send_command.emit('home')
 
     def open_uart(self):
+        self.write_log(str(threading.current_thread().ident))
         port = self.ui.ports_combobox.currentText()
         self.open_uart_connection.emit(port)
 
@@ -169,6 +182,7 @@ class MainController(QtWidgets.QMainWindow):
             command_list.append(command)
         self.running_flow = True
 
+        # 會變成在 GUI thread 執行
         self.flow_worker.do_terminate()
         self.flow_worker.set_command_list(command_list)
         self.flow_thread.start()
